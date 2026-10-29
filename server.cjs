@@ -1,3 +1,4 @@
+
 const express = require("express");
 const path = require("node:path");
 
@@ -6,21 +7,22 @@ require("dotenv").config({
 });
 
 const app = express();
-const port = Number(process.env.PORT || 3000);
 
 app.use(express.json({ limit: "100kb" }));
 app.use(express.static(path.join(__dirname, "public")));
 
+app.get("/api/health", (req, res) => {
+  res.json({ ok: true, service: "AI Chat Hub" });
+});
+
 app.post("/api/chat", async (req, res) => {
   const key = process.env.ROUTER_API_KEY?.trim();
+  const baseUrl = process.env.ROUTER_BASE_URL?.trim();
+  const model = process.env.ROUTER_MODEL?.trim();
 
-  const model = process.env.ROUTER_MODEL
-    ?.trim()
-    .replace(/^(?:gemini\/|models\/)/, "");
-
-  if (!key || !model) {
+  if (!key || !baseUrl || !model) {
     return res.status(500).json({
-      error: "Thiếu ROUTER_API_KEY hoặc ROUTER_MODEL trong file .env."
+      error: "Thiếu ROUTER_API_KEY, ROUTER_BASE_URL hoặc ROUTER_MODEL trong Environment Variables."
     });
   }
 
@@ -33,115 +35,84 @@ app.post("/api/chat", async (req, res) => {
     !messages.every(
       (m) =>
         m &&
-        ["user", "assistant"].includes(m.role) &&
+        ["user", "assistant", "system"].includes(m.role) &&
         typeof m.content === "string" &&
         m.content.trim().length > 0 &&
         m.content.length <= 12000
     )
   ) {
     return res.status(400).json({
-      error: "Tin nhắn không hợp lệ hoặc quá dài."
+      error: "Danh sách messages không hợp lệ hoặc nội dung quá dài."
     });
   }
 
   try {
-    const response = await fetch(
-      "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${key}`
-        },
-        body: JSON.stringify({
-          model,
-          messages: messages.map(({ role, content }) => ({
-            role,
-            content
-          })),
-          stream: false
-        }),
-        signal: AbortSignal.timeout(50000)
-      }
-    );
+    const endpoint = `${baseUrl.replace(/\/+$/, "")}/chat/completions`;
+
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${key}`
+      },
+      body: JSON.stringify({
+        model,
+        messages,
+        stream: false
+      }),
+      signal: AbortSignal.timeout(50000)
+    });
 
     const raw = await response.text();
-    console.log("HTTP Google:", response.status);
-  console.log("Phản hồi Google:", raw);
-
     let data;
 
     try {
       data = JSON.parse(raw);
     } catch {
-      throw new Error(
-        `Google trả về dữ liệu không hợp lệ (HTTP ${response.status}).`
-      );
+      console.error("Phản hồi không phải JSON:", response.status);
+      return res.status(502).json({
+        error: `9Router trả về dữ liệu không hợp lệ (HTTP ${response.status}).`
+      });
     }
 
     if (!response.ok) {
+      console.error("Lỗi từ 9Router:", response.status, data);
       return res.status(response.status).json({
-        error:
-          response.status === 429
-            ? "Đã vượt giới hạn yêu cầu hoặc quota Gemini. Kiểm tra hạn mức trong Google AI Studio."
-            : data?.error?.message ||
-              `Google báo lỗi HTTP ${response.status}.`
+        error: data?.error?.message ||
+          data?.message ||
+          `9Router báo lỗi HTTP ${response.status}.`
       });
     }
 
     const reply = data?.choices?.[0]?.message?.content;
 
     if (typeof reply !== "string" || !reply.trim()) {
-      throw new Error("Gemini chưa trả về nội dung văn bản.");
+      console.error("Phản hồi thiếu nội dung choices.message.content");
+      return res.status(502).json({
+        error: "9Router không trả về nội dung văn bản."
+      });
     }
 
     return res.json({ reply });
   } catch (error) {
-    console.error("Lỗi gọi Gemini:", error.message);
+    console.error("Lỗi gọi 9Router:", error.message);
 
     return res.status(502).json({
-      error:
-        error.name === "TimeoutError"
-          ? "Gemini phản hồi quá lâu. Bạn thử lại nhé."
-          : error.message === "fetch failed"
-            ? "Không kết nối được API Google Gemini. Kiểm tra Internet."
-            : error.message
+      error: error.name === "TimeoutError"
+        ? "9Router phản hồi quá lâu. Hãy thử lại."
+        : "Không kết nối được endpoint 9Router. Hãy kiểm tra ROUTER_BASE_URL."
     });
   }
 });
 
-// Trả lỗi JSON để giao diện có thể hiển thị.
-app.use((error, req, res, next) => {
-if (error.type === "entity.too.large") {
-    return res.status(413).json({
-      error: "Dữ liệu gửi lên vượt quá 100 KB."
-    });
-  }
+// Vercel sử dụng handler này; không tự mở cổng trên Vercel.
+module.exports = app;
 
-  if (error.type === "entity.parse.failed") {
-    return res.status(400).json({
-      error: "Dữ liệu JSON không hợp lệ."
-    });
-  }
+// Chạy trực tiếp trên máy tính khi dùng npm start.
+if (require.main === module) {
+  const port = Number(process.env.PORT || 3000);
 
-  console.error(error);
-
-  return res.status(500).json({
-    error: "Máy chủ gặp lỗi."
+  app.listen(port, () => {
+    console.log(`Website: http://localhost:${port}`);
   });
-});
-
-const server = app.listen(port, "127.0.0.1", () => {
-  console.log(`Website: http://127.0.0.1:${port}`);
-  console.log("Nhấn Ctrl + C để dừng.");
-});
-
-server.on("error", (error) => {
-  console.error(
-    error.code === "EADDRINUSE"
-      ? `Cổng ${port} đang được sử dụng. Đổi PORT trong file .env.`
-      : error.message
-  );
-
-  process.exit(1);
-});
+}

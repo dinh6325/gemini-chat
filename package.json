@@ -1,9 +1,10 @@
+
 {
   "name": "gemini-chat",
   "version": "1.0.0",
-  "main": "index.js",
+  "main": "server.cjs",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "node server.cjs",
     "dev": "node server.cjs"
   },
   "keywords": [],
