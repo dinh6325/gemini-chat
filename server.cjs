@@ -1,20 +1,26 @@
 const express = require("express");
 const path = require("node:path");
 
+require("dotenv").config({
+  path: path.join(__dirname, ".env")
+});
+
 const app = express();
+const port = Number(process.env.PORT || 3000);
 
 app.use(express.json({ limit: "100kb" }));
 app.use(express.static(path.join(__dirname, "public")));
 
 app.post("/api/chat", async (req, res) => {
   const key = process.env.ROUTER_API_KEY?.trim();
+
   const model = process.env.ROUTER_MODEL
     ?.trim()
-    .replace(/^gemini\//, "");
+    .replace(/^(?:gemini\/|models\/)/, "");
 
   if (!key || !model) {
     return res.status(500).json({
-      error: "Thiếu ROUTER_API_KEY hoặc ROUTER_MODEL trên Vercel."
+      error: "Thiếu ROUTER_API_KEY hoặc ROUTER_MODEL trong file .env."
     });
   }
 
@@ -24,11 +30,13 @@ app.post("/api/chat", async (req, res) => {
     !Array.isArray(messages) ||
     messages.length < 1 ||
     messages.length > 40 ||
-    !messages.every(m =>
-      m &&
-      ["user", "assistant"].includes(m.role) &&
-      typeof m.content === "string" &&
-      m.content.length <= 12000
+    !messages.every(
+      (m) =>
+        m &&
+        ["user", "assistant"].includes(m.role) &&
+        typeof m.content === "string" &&
+        m.content.trim().length > 0 &&
+        m.content.length <= 12000
     )
   ) {
     return res.status(400).json({
@@ -47,7 +55,10 @@ app.post("/api/chat", async (req, res) => {
         },
         body: JSON.stringify({
           model,
-          messages,
+          messages: messages.map(({ role, content }) => ({
+            role,
+            content
+          })),
           stream: false
         }),
         signal: AbortSignal.timeout(50000)
@@ -55,6 +66,9 @@ app.post("/api/chat", async (req, res) => {
     );
 
     const raw = await response.text();
+    console.log("HTTP Google:", response.status);
+  console.log("Phản hồi Google:", raw);
+
     let data;
 
     try {
@@ -67,13 +81,15 @@ app.post("/api/chat", async (req, res) => {
 
     if (!response.ok) {
       return res.status(response.status).json({
-        error: response.status === 429
-          ? "Model Gemini hết hoặc chưa có quota. Kiểm tra hạn mức Google AI Studio."
-          : data.error?.message || `Google báo lỗi HTTP ${response.status}.`
+        error:
+          response.status === 429
+            ? "Đã vượt giới hạn yêu cầu hoặc quota Gemini. Kiểm tra hạn mức trong Google AI Studio."
+            : data?.error?.message ||
+              `Google báo lỗi HTTP ${response.status}.`
       });
     }
 
-    const reply = data.choices?.[0]?.message?.content;
+    const reply = data?.choices?.[0]?.message?.content;
 
     if (typeof reply !== "string" || !reply.trim()) {
       throw new Error("Gemini chưa trả về nội dung văn bản.");
@@ -81,24 +97,51 @@ app.post("/api/chat", async (req, res) => {
 
     return res.json({ reply });
   } catch (error) {
-    console.error(error.message);
+    console.error("Lỗi gọi Gemini:", error.message);
 
     return res.status(502).json({
-      error: error.message === "fetch failed"
-        ? "Không kết nối được API Google Gemini."
-        : error.name === "TimeoutError"
+      error:
+        error.name === "TimeoutError"
           ? "Gemini phản hồi quá lâu. Bạn thử lại nhé."
-          : error.message
+          : error.message === "fetch failed"
+            ? "Không kết nối được API Google Gemini. Kiểm tra Internet."
+            : error.message
     });
   }
 });
 
-// Chạy trên máy khi mở trực tiếp file này.
-if (require.main === module) {
-  app.listen(3000, "127.0.0.1", () => {
-    console.log("Website: http://127.0.0.1:3000");
-  });
-}
+// Trả lỗi JSON để giao diện có thể hiển thị.
+app.use((error, req, res, next) => {
+if (error.type === "entity.too.large") {
+    return res.status(413).json({
+      error: "Dữ liệu gửi lên vượt quá 100 KB."
+    });
+  }
 
-// Cho Vercel sử dụng.
-module.exports = app;
+  if (error.type === "entity.parse.failed") {
+    return res.status(400).json({
+      error: "Dữ liệu JSON không hợp lệ."
+    });
+  }
+
+  console.error(error);
+
+  return res.status(500).json({
+    error: "Máy chủ gặp lỗi."
+  });
+});
+
+const server = app.listen(port, "127.0.0.1", () => {
+  console.log(`Website: http://127.0.0.1:${port}`);
+  console.log("Nhấn Ctrl + C để dừng.");
+});
+
+server.on("error", (error) => {
+  console.error(
+    error.code === "EADDRINUSE"
+      ? `Cổng ${port} đang được sử dụng. Đổi PORT trong file .env.`
+      : error.message
+  );
+
+  process.exit(1);
+});
